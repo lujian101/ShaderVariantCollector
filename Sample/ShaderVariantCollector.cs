@@ -1141,12 +1141,15 @@ namespace AresEditor {
                 ( path == "Resources/unity_builtin_extra" ||
                 path == "Library/unity default resources" );
         }
-
+        
+        static List<ShaderCompilerData> backupShaderCompilerData = new List<ShaderCompilerData>();
+        
         public void OnProcessShader( Shader shader, ShaderSnippetData snippet, IList<ShaderCompilerData> data ) {
             var shaderPath = AssetDatabase.GetAssetPath( shader );
             if ( IsUnityDefaultResource( shaderPath ) ) {
                 return;
             }
+            backupShaderCompilerData.Clear();
             ShaderVariantInfo svcInfo = null;
             if ( !s_ShaderVariantCollections.TryGetValue( shaderPath, out svcInfo ) ) {
                 var shaderVariantsPath = System.IO.Path.ChangeExtension( shaderPath, ".shadervariants" );
@@ -1155,11 +1158,11 @@ namespace AresEditor {
                 if ( svc != null ) {
                     var comb = ShaderUtils.ParseShaderCombinations( shader, true );
                     if ( comb != null && comb.snippets != null && comb.snippets.Count > 0 ) {
-                        var svnInfo = new ShaderVariantInfo();
-                        svnInfo.variantCollection = svc;
-                        svnInfo.rawVariantCollection = ShaderVariantCollectionHelper.ExtractData( svc );
-                        svnInfo.combinations = comb;
-                        s_ShaderVariantCollections.Add( shaderPath, svnInfo );
+                        svcInfo = new ShaderVariantInfo();
+                        svcInfo.variantCollection = svc;
+                        svcInfo.rawVariantCollection = ShaderVariantCollectionHelper.ExtractData( svc );
+                        svcInfo.combinations = comb;
+                        s_ShaderVariantCollections.Add( shaderPath, svcInfo );
                     }
                 }
             }
@@ -1180,6 +1183,10 @@ namespace AresEditor {
                 if ( snippetCombinations == null ) {
                     return;
                 }
+                List<ShaderVariantCollectionHelper.ShaderVariant> rawVariants;
+                if ( !svcInfo.rawVariantCollection.TryGetValue( shader, out rawVariants ) ) {
+                    return;
+                }
                 var removeCount = 0;
                 StringBuilder infoSB = null;
                 var fullKeywords = new List<String>();
@@ -1193,66 +1200,73 @@ namespace AresEditor {
                         for ( int j = 0; j < _keywords.Length; ++j ) {
                             var name = _keywords[ j ].GetKeywordName();
                             fullKeywords.Add( name );
-                            if ( snippetCombinations.multi_compiles != null ) {
-                                if ( Array.IndexOf( snippetCombinations.multi_compiles, name ) < 0 ) {
-                                    // 排除multi_compiles编译宏，这些是必须使用的，不能剔除
-                                    keywordList.Add( name );
-                                }
+                            // 如果有当前关键词属于multi_compiles，注意排除
+                            if ( snippetCombinations.multi_compiles != null &&
+                                Array.IndexOf( snippetCombinations.multi_compiles, name ) >= 0 ) {
+                                // 排除multi_compiles编译宏，这些是必须使用的，不能剔除
+                                continue;
                             }
+                            keywordList.Add( name );
                         }
                         if ( keywordList.Count > 0 ) {
                             try {
-                                List<ShaderVariantCollectionHelper.ShaderVariant> rawVariants;
-                                if ( svcInfo.rawVariantCollection.TryGetValue( shader, out rawVariants ) ) {
-                                    var matched = false;
-                                    // 遍历所有从项目中搜集到的变体
-                                    for ( int n = 0; n < rawVariants.Count; ++n ) {
-                                        var variant = rawVariants[ n ];
-                                        if ( keywordList.Count > variant.keywords.Length ) {
-                                            // keywordList 已经去掉了multi_compiles，而variant.keywords可能含有
-                                            // 从数量的差异就能提前能知道不可能匹配得上
-                                            continue;
-                                        }
-                                        var matchCount = -1;
-                                        var mismatchCount = 0;
-                                        var skipCount = 0;
-                                        if ( variant.shader == shader && variant.passType == snippet.passType ) {
-                                            matchCount = 0;
-                                            // 查找匹配的变体时，需要排除multi_compiles关键字
-                                            for ( var m = 0; m < variant.keywords.Length; ++m ) {
-                                                var keyword = variant.keywords[ m ];
-                                                if ( Array.IndexOf( snippetCombinations.multi_compiles, keyword ) < 0 ) {
-                                                    if ( keywordList.Contains( keyword ) ) {
-                                                        ++matchCount;
-                                                    } else {
-                                                        ++mismatchCount;
-                                                        break;
-                                                    }
+                                var matched = false;
+                                // 遍历所有从项目中搜集到的变体
+                                for ( int n = 0; n < rawVariants.Count; ++n ) {
+                                    var variant = rawVariants[ n ];
+                                    if ( keywordList.Count > variant.keywords.Length ) {
+                                        // keywordList 已经去掉了multi_compiles，而variant.keywords可能含有
+                                        // 从数量的差异就能提前能知道不可能匹配得上
+                                        continue;
+                                    }
+                                    var matchCount = -1;
+                                    var mismatchCount = 0;
+                                    var skipCount = 0;
+                                    if ( variant.shader == shader && variant.passType == snippet.passType ) {
+                                        matchCount = 0;
+                                        // 查找匹配的变体时，需要排除multi_compiles关键字
+                                        for ( var m = 0; m < variant.keywords.Length; ++m ) {
+                                            var keyword = variant.keywords[ m ];
+                                            if ( snippetCombinations.multi_compiles == null || Array.IndexOf( snippetCombinations.multi_compiles, keyword ) < 0 ) {
+                                                if ( keywordList.Contains( keyword ) ) {
+                                                    ++matchCount;
                                                 } else {
-                                                    ++skipCount;
+                                                    ++mismatchCount;
+                                                    break;
                                                 }
+                                            } else {
+                                                ++skipCount;
                                             }
                                         }
-                                        if ( matchCount >= 0 && mismatchCount == 0 && matchCount + skipCount == keywordList.Count ) {
-                                            matched = true;
-                                            break;
-                                        }
                                     }
-                                    if ( !matched ) {
-                                        ++removeCount;
-                                        data.RemoveAt( i );
-                                        infoSB = infoSB ?? new StringBuilder();
-                                        var _fullKeywords = String.Join( " ", fullKeywords.ToArray() );
-                                        infoSB.Append( _fullKeywords ).AppendLine();
-                                        var info = String.Format( "{0}\nRemove Shader ShaderVariant: {1}", shader.name, _fullKeywords );
-                                        Debug.Log( info );
+                                    if ( matchCount >= 0 && mismatchCount == 0 && matchCount + skipCount == keywordList.Count ) {
+                                        matched = true;
+                                        break;
                                     }
+                                }
+                                if ( !matched ) {
+                                    ++removeCount;
+                                    backupShaderCompilerData.Add( data[ i ] );
+                                    data.RemoveAt( i );
+                                    infoSB = infoSB ?? new StringBuilder();
+                                    var _fullKeywords = String.Join( " ", fullKeywords.ToArray() );
+                                    infoSB.Append( _fullKeywords ).AppendLine();
+                                    var info = String.Format( "{0}\nRemove Shader ShaderVariant: {1}", shader.name, _fullKeywords );
+                                    Debug.Log( info );
                                 }
                             } catch ( Exception e ) {
                                 Debug.LogException( e );
                             }
                         }
                     }
+                }
+                if ( data.Count < rawVariants.Count ) {
+                    Debug.LogErrorFormat( "Trim shader compiler data failed: {0}.", shader.name );
+                    // 变体被完全剔除了，说明变体剔除逻辑有错误
+                    // 放弃本次编译优化，把在已经剔除的数据重填充回去，完全放弃本次优化
+                    backupShaderCompilerData.ForEach( e => data.Add( e ) );
+                    backupShaderCompilerData.Clear();
+                    return;
                 }
                 if ( removeCount > 0 && infoSB != null ) {
                     var info = String.Format( "{0}\nRemove ShaderVariant Count: {1}\n{2}", shader.name, removeCount, infoSB.ToString() );
