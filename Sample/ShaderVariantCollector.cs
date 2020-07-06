@@ -1417,7 +1417,7 @@ namespace SVCTool {
                                                 }
                                             }
                                         }
-                                        if ( matchCount >= 0 && mismatchCount == 0 && matchCount == keywordList.Count && matchCount + skipCount == fullKeywords.Count ) {
+                                        if ( matchCount >= 0 && mismatchCount == 0 && matchCount == keywordList.Count && matchCount + skipCount == variant.keywords.Length ) {
                                             matched = true;
                                             break;
                                         }
